@@ -56,7 +56,6 @@ class HoltWintersCalibrated:
 
         best_mse = np.inf
 
-        # Usa últimos seasonal_periods como validación interna
         split = len(train) - self.seasonal_periods
         t_tr, t_val = train[:split], train[split:]
 
@@ -78,7 +77,6 @@ class HoltWintersCalibrated:
             except Exception:
                 continue
 
-        # Reentrenar con toda la serie
         if self.best_config_:
             m = ExponentialSmoothing(
                 train,
@@ -109,8 +107,7 @@ class ARIMAModel:
         return self
 
     def predict(self, steps):
-        forecast = self.fitted_.forecast(steps=steps)
-        return forecast
+        return self.fitted_.forecast(steps=steps)
 
 
 class ARIMACalibrated:
@@ -130,9 +127,11 @@ class ARIMACalibrated:
         best_aic = np.inf
         best_order = (1, 1, 1)
 
-        for p, d, q in product(range(self.max_p + 1),
-                                range(self.max_d + 1),
-                                range(self.max_q + 1)):
+        for p, d, q in product(
+            range(self.max_p + 1),
+            range(self.max_d + 1),
+            range(self.max_q + 1)
+        ):
             try:
                 m = ARIMA(train, order=(p, d, q))
                 fit = m.fit()
@@ -155,51 +154,65 @@ class LSTMModel:
     """Red LSTM para predicción de series de tiempo."""
 
     def __init__(self, units=50, layers=2, epochs=50, batch_size=16,
-                 window_size=12, dropout=0.2):
+                 window_size=12, dropout=0.2, scale=True):
         self.units = units
         self.layers = layers
         self.epochs = epochs
         self.batch_size = batch_size
         self.window_size = window_size
         self.dropout = dropout
+        self.scale = scale
         self.model_ = None
         self.scaler_params_ = None
+        self._last_window = None
 
     def _build_model(self):
-        import tensorflow as tf
         from tensorflow.keras.models import Sequential
         from tensorflow.keras.layers import LSTM, Dense, Dropout
 
         model = Sequential()
         for i in range(self.layers):
             return_seq = (i < self.layers - 1)
-            model.add(LSTM(self.units, return_sequences=return_seq,
-                           input_shape=(self.window_size, 1) if i == 0 else None))
+            model.add(LSTM(
+                self.units,
+                return_sequences=return_seq,
+                input_shape=(self.window_size, 1) if i == 0 else None
+            ))
             model.add(Dropout(self.dropout))
         model.add(Dense(1))
         model.compile(optimizer="adam", loss="mse")
         return model
 
-    def fit(self, train):
-        from mlbenchmark.preprocessing import normalize_timeseries, create_sequences
+    def fit(self, train, already_normalized=False):
+        from mlbenchmark.preprocessing import create_sequences
 
-        # Normalizar
-        min_val = np.min(train)
-        max_val = np.max(train)
-        denom = max_val - min_val if max_val != min_val else 1.0
-        train_norm = (train - min_val) / denom
-        self.scaler_params_ = (min_val, max_val)
+        train = np.asarray(train).astype(float)
+
+        if already_normalized or (not self.scale):
+            train_norm = train
+            self.scaler_params_ = (0.0, 1.0)
+        else:
+            min_val = float(np.min(train))
+            max_val = float(np.max(train))
+            denom = (max_val - min_val) if max_val != min_val else 1.0
+            train_norm = (train - min_val) / denom
+            self.scaler_params_ = (min_val, max_val)
 
         X, y = create_sequences(train_norm, self.window_size)
         self.model_ = self._build_model()
-        self.model_.fit(X, y, epochs=self.epochs, batch_size=self.batch_size,
-                        verbose=0)
+        self.model_.fit(
+            X, y,
+            epochs=self.epochs,
+            batch_size=self.batch_size,
+            verbose=0
+        )
+
         self._last_window = train_norm[-self.window_size:]
         return self
 
     def predict(self, steps):
         min_val, max_val = self.scaler_params_
-        denom = max_val - min_val if max_val != min_val else 1.0
+        denom = (max_val - min_val) if max_val != min_val else 1.0
 
         preds = []
         window = list(self._last_window)
@@ -225,5 +238,11 @@ def get_timeseries_models(seasonal_periods=12):
         "Holt-Winters Calibrado": HoltWintersCalibrated(seasonal_periods=seasonal_periods),
         "ARIMA(1,1,1)": ARIMAModel(order=(1, 1, 1)),
         "ARIMA Calibrado": ARIMACalibrated(max_p=2, max_d=2, max_q=2),
-        "LSTM": LSTMModel(units=50, layers=2, epochs=30, window_size=min(12, seasonal_periods)),
+        "LSTM": LSTMModel(
+            units=50,
+            layers=2,
+            epochs=30,
+            window_size=min(12, seasonal_periods),
+            scale=False
+        ),
     }
